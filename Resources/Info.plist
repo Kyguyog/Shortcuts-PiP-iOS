@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+
+    <!-- ───────────────────────────────────────────────────
+         Background Modes
+         "audio"   → lets the app process in the background
+                      and is required for AVPictureInPicture
+                      with AVSampleBufferDisplayLayer.
+         ─────────────────────────────────────────────────── -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>audio</string>
+    </array>
+
+    <!-- PiP entitlement check — not needed for sideloading
+         but harmless to declare -->
+    <key>NSSupportsLiveActivities</key>
+    <false/>
+
+    <!-- Needed so iOS knows the app supports PiP -->
+    <key>AVInitialPlaybackRate</key>
+    <real>1.0</real>
+
+    <!-- Camera / microphone not required -->
+
+    <!-- Minimum iOS version -->
+    <key>MinimumOSVersion</key>
+    <string>17.0</string>
+
+    <!-- Main storyboard is replaced by SwiftUI -->
+    <key>UILaunchScreen</key>
+    <dict/>
+
+    <key>CFBundleName</key>
+    <string>PiPTextDisplay</string>
+
+    <key>CFBundleDisplayName</key>
+    <string>PiP Display</string>
+
+    <key>CFBundleIdentifier</key>
+    <string>com.yourteam.PiPTextDisplay</string>
+
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+
+</dict>
+</plist>
