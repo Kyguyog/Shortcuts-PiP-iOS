@@ -13,7 +13,6 @@
 		D0AE09AB4B01562D0E7B3C60 /* SampleBufferLayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B27DCD97C30CD5C513477F98 /* SampleBufferLayerView.swift */; };
 		45AAE402E3C6AD50B50818FC /* TextFrameRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87017EAC5BF847B973714DE6 /* TextFrameRenderer.swift */; };
 		6D4292F73DA3C6E68B1F31EA /* PiPIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBEEA20F109D6F4C07D2C6BC /* PiPIntents.swift */; };
-		99F98A4DD78C697B530489D0 /* Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = DF6411E77D80A262CFB5FB35 /* Info.plist */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -172,7 +171,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				99F98A4DD78C697B530489D0 /* Info.plist in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -315,8 +313,6 @@
 		A01B5478D00658A3163D07E3 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSTCAT_COMPILER_OPTIMIZATION = space;
-				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_ENTITLEMENTS = Resources/PiPTextDisplay.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
