@@ -1,0 +1,334 @@
+# .github/workflows/ci.yml
+#
+# PiPTextDisplay — CI / CD Pipeline
+#
+# Jobs:
+#   1. lint          — SwiftLint (warns, never fails the build)
+#   2. build-test    — xcodebuild build + unit tests on latest iOS simulator
+#   3. archive       — Release archive → unsigned IPA (sideload-ready)
+#   4. release       — Attaches IPA + dSYM zip to a GitHub Release on version tags
+#
+# Required repository secrets (Settings → Secrets → Actions):
+#   None required for the build/lint/test jobs.
+#   For signed Ad-Hoc / Development IPA export add:
+#     SIGNING_CERTIFICATE_P12_BASE64   — base64 of your .p12 signing cert
+#     SIGNING_CERTIFICATE_PASSWORD     — p12 password
+#     PROVISIONING_PROFILE_BASE64      — base64 of your .mobileprovision
+#     KEYCHAIN_PASSWORD                — any password, used only in CI keychain
+#
+#   If those secrets are absent the workflow falls back to an UNSIGNED IPA
+#   (suitable for AltStore / Sideloadly sideloading).
+
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags:     [ 'v*.*.*' ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:          # allow manual runs
+
+# Cancel any in-progress run for the same branch/PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SCHEME:       PiPTextDisplay
+  PROJECT:      PiPTextDisplay.xcodeproj
+  BUNDLE_ID:    com.yourteam.PiPTextDisplay
+  IPA_NAME:     PiPTextDisplay
+  XCODE_VERSION: '16.2'           # pin to avoid surprise breakage
+  DESTINATION:  'platform=iOS Simulator,name=iPhone 16 Pro,OS=latest'
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+# ── 1. SwiftLint ─────────────────────────────────────────────────────────────
+  lint:
+    name: SwiftLint
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode ${{ env.XCODE_VERSION }}
+        run: sudo xcode-select -s /Applications/Xcode_${{ env.XCODE_VERSION }}.app
+
+      - name: Install SwiftLint
+        run: brew install swiftlint || true   # non-fatal if already present
+
+      - name: Run SwiftLint
+        # warn-only — violations don't fail the pipeline
+        run: swiftlint lint --reporter github-actions-logging || true
+
+# ── 2. Build + Test ──────────────────────────────────────────────────────────
+  build-test:
+    name: Build & Test (Simulator)
+    runs-on: macos-15
+    needs: lint
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode ${{ env.XCODE_VERSION }}
+        run: sudo xcode-select -s /Applications/Xcode_${{ env.XCODE_VERSION }}.app
+
+      - name: Show SDK / toolchain info
+        run: |
+          xcodebuild -version
+          xcrun simctl list runtimes | head -20
+
+      # Cache DerivedData between runs (keyed on source hash)
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData
+          key: deriveddata-${{ runner.os }}-${{ hashFiles('**/*.swift', '**/*.xcodeproj/**') }}
+          restore-keys: |
+            deriveddata-${{ runner.os }}-
+
+      - name: Resolve Swift Package dependencies
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project ${{ env.PROJECT }} \
+            -scheme   ${{ env.SCHEME }}
+
+      - name: Build for Testing
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing \
+            -project     ${{ env.PROJECT }} \
+            -scheme      ${{ env.SCHEME }} \
+            -destination "${{ env.DESTINATION }}" \
+            -configuration Debug \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcpretty --color --simple
+
+      - name: Run Tests
+        run: |
+          set -o pipefail
+          xcodebuild test-without-building \
+            -project     ${{ env.PROJECT }} \
+            -scheme      ${{ env.SCHEME }} \
+            -destination "${{ env.DESTINATION }}" \
+            -resultBundlePath TestResults.xcresult \
+            | xcpretty --color --simple
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TestResults-${{ github.run_number }}
+          path: TestResults.xcresult
+          retention-days: 14
+
+# ── 3. Archive → IPA ─────────────────────────────────────────────────────────
+  archive:
+    name: Archive & Export IPA
+    runs-on: macos-15
+    needs: build-test
+    # Run on pushes to main or any version tag; skip on PRs
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode ${{ env.XCODE_VERSION }}
+        run: sudo xcode-select -s /Applications/Xcode_${{ env.XCODE_VERSION }}.app
+
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData
+          key: deriveddata-${{ runner.os }}-${{ hashFiles('**/*.swift', '**/*.xcodeproj/**') }}
+          restore-keys: |
+            deriveddata-${{ runner.os }}-
+
+      # ── Optional: install signing assets if secrets are present ──────────
+      - name: Install signing certificate
+        if: ${{ env.SIGNING_CERTIFICATE_P12_BASE64 != '' }}
+        env:
+          SIGNING_CERTIFICATE_P12_BASE64: ${{ secrets.SIGNING_CERTIFICATE_P12_BASE64 }}
+          SIGNING_CERTIFICATE_PASSWORD:   ${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD:              ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          CERT_PATH=$RUNNER_TEMP/signing.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/ci.keychain-db
+
+          echo "$SIGNING_CERTIFICATE_P12_BASE64" | base64 --decode -o "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security import "$CERT_PATH" \
+            -P "$SIGNING_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+      - name: Install provisioning profile
+        if: ${{ env.PROVISIONING_PROFILE_BASE64 != '' }}
+        env:
+          PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          PP_PATH=$RUNNER_TEMP/profile.mobileprovision
+          echo "$PROVISIONING_PROFILE_BASE64" | base64 --decode -o "$PP_PATH"
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp "$PP_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/
+
+      # ── Archive ───────────────────────────────────────────────────────────
+      - name: Archive
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project         ${{ env.PROJECT }} \
+            -scheme          ${{ env.SCHEME }} \
+            -configuration   Release \
+            -archivePath     $RUNNER_TEMP/${{ env.IPA_NAME }}.xcarchive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcpretty --color --simple
+
+      # ── Export IPA (unsigned — sideload-ready) ────────────────────────────
+      - name: Write ExportOptions.plist
+        run: |
+          cat > $RUNNER_TEMP/ExportOptions.plist << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>ad-hoc</string>
+            <key>compileBitcode</key>
+            <false/>
+            <key>stripSwiftSymbols</key>
+            <true/>
+            <key>thinning</key>
+            <string>&lt;none&gt;</string>
+          </dict>
+          </plist>
+          PLIST
+
+      - name: Export IPA
+        run: |
+          set -o pipefail
+          xcodebuild -exportArchive \
+            -archivePath     $RUNNER_TEMP/${{ env.IPA_NAME }}.xcarchive \
+            -exportPath      $RUNNER_TEMP/export \
+            -exportOptionsPlist $RUNNER_TEMP/ExportOptions.plist \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            | xcpretty --color --simple || true
+            # "|| true" because unsigned export exits non-zero on older Xcode;
+            # the .app is still valid for sideloading via Sideloadly/AltStore.
+
+      # Fallback: if xcodebuild export failed (unsigned), manually repack the .app
+      - name: Package .app as IPA (unsigned fallback)
+        run: |
+          EXPORT_DIR=$RUNNER_TEMP/export
+          ARCHIVE=$RUNNER_TEMP/${{ env.IPA_NAME }}.xcarchive
+
+          if [ ! -f "$EXPORT_DIR/${{ env.IPA_NAME }}.ipa" ]; then
+            echo "xcodebuild export produced no IPA — repacking manually"
+            mkdir -p /tmp/Payload
+            cp -r "$ARCHIVE/Products/Applications/${{ env.SCHEME }}.app" /tmp/Payload/
+            cd /tmp && zip -r "$EXPORT_DIR/${{ env.IPA_NAME }}.ipa" Payload/
+            echo "Repacked IPA at $EXPORT_DIR/${{ env.IPA_NAME }}.ipa"
+          fi
+
+      # Zip the dSYM for symbolication
+      - name: Zip dSYMs
+        run: |
+          ARCHIVE=$RUNNER_TEMP/${{ env.IPA_NAME }}.xcarchive
+          zip -r $RUNNER_TEMP/${{ env.IPA_NAME }}-dSYMs.zip \
+            "$ARCHIVE/dSYMs/"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.IPA_NAME }}-${{ github.run_number }}.ipa
+          path: ${{ runner.temp }}/export/${{ env.IPA_NAME }}.ipa
+          retention-days: 30
+
+      - name: Upload dSYMs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.IPA_NAME }}-${{ github.run_number }}-dSYMs
+          path: ${{ runner.temp }}/${{ env.IPA_NAME }}-dSYMs.zip
+          retention-days: 30
+
+# ── 4. GitHub Release ─────────────────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    runs-on: macos-15
+    needs: archive
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    permissions:
+      contents: write     # needed to create releases and upload assets
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history for changelog generation
+
+      - name: Download IPA artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.IPA_NAME }}-${{ github.run_number }}.ipa
+          path: release-assets/
+
+      - name: Download dSYMs artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.IPA_NAME }}-${{ github.run_number }}-dSYMs
+          path: release-assets/
+
+      # Auto-generate a changelog from commits since the last tag
+      - name: Generate changelog
+        id: changelog
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            LOG=$(git log "$PREV_TAG"..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          else
+            LOG=$(git log --pretty=format:"- %s (%h)" --no-merges | head -20)
+          fi
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$LOG"           >> $GITHUB_OUTPUT
+          echo "EOF"            >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "PiP Display ${{ github.ref_name }}"
+          body: |
+            ## What's Changed
+            ${{ steps.changelog.outputs.changelog }}
+
+            ## Installation (Sideloading)
+            1. Download `PiPTextDisplay.ipa` below.
+            2. Use **AltStore**, **Sideloadly**, or **TrollStore** to install.
+            3. On device: *Settings → General → VPN & Device Management* → trust your developer cert.
+            4. Launch the app, tap **Start PiP**, then background the app — the PiP window persists.
+
+            > **Note:** This IPA is unsigned. You must re-sign it with your own Apple ID via the tools above.
+
+            ## Shortcuts Setup
+            See [README.md](https://github.com/${{ github.repository }}/blob/main/README.md#shortcuts-integration) for the full Shortcuts workflow.
+          files: |
+            release-assets/${{ env.IPA_NAME }}.ipa
+            release-assets/${{ env.IPA_NAME }}-dSYMs.zip
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}  # e.g. v1.0.0-beta → prerelease
